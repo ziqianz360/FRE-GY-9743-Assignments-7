@@ -134,19 +134,70 @@ class Interpolator1DPCP(Interpolator1D):
 
 
 class Interpolator1DMonotoneConvex(Interpolator1D):
-    """HW7: implement your own monotone, convex IFR interpolator here."""
+    """Continuous piecewise-linear IFR interpolation for monotone, convex data.
+
+    Convexity requires nondecreasing secant slopes, allowing floating-point
+    roundoff. Shape guarantees apply only between the first and last nodes;
+    FLAT extrapolation need not preserve convexity beyond that interval.
+    """
 
     def __init__(self, axis1: np.ndarray, values: np.ndarray,
                  extrapolation_method: ExtrapMethod) -> None:
+        axis1 = np.array(axis1, dtype=float, copy=True)
+        values = np.array(values, dtype=float, copy=True)
+        if axis1.ndim != 1 or values.ndim != 1:
+            raise ValueError("Node times and IFR values must be one-dimensional.")
+        if len(axis1) == 0 or len(axis1) != len(values):
+            raise ValueError("Node times and IFR values must have equal, nonzero length.")
+        if not np.all(np.isfinite(axis1)) or not np.all(np.isfinite(values)):
+            raise ValueError("Node times and IFR values must be finite.")
+        if not np.all(np.diff(axis1) > 0):
+            raise ValueError("Node times must be strictly increasing.")
+        if extrapolation_method != ExtrapMethod.FLAT:
+            raise ValueError("Monotone convex interpolation requires FLAT extrapolation.")
+
+        changes = np.diff(values)
+        if not (np.all(changes >= 0) or np.all(changes <= 0)):
+            raise ValueError("IFR values must be monotone to preserve all supplied points.")
+        slopes = changes / np.diff(axis1)
+        if not np.all(np.isfinite(slopes)):
+            raise ValueError("IFR secant slopes must be finite.")
+        if len(slopes) > 1:
+            tolerance = 64 * np.finfo(float).eps * np.max(np.abs(slopes))
+            if np.any(np.diff(slopes) < -tolerance):
+                raise ValueError("Convex IFR data require nondecreasing secant slopes.")
+
         super().__init__(axis1, values, InterpMethod.MONOTONE_CONVEX,
                          extrapolation_method)
-        # TODO: Prepare your interpolation method.
+        self.slopes_ = slopes
+        areas = 0.5 * (values[:-1] + values[1:]) * np.diff(axis1)
+        self.integrated_values_ = np.concatenate(([0.0], np.cumsum(areas)))
 
     def interpolate(self, x: float) -> float:
-        raise NotImplementedError("HW7: implement interpolate")
+        if not np.isfinite(x):
+            raise ValueError("Interpolation time must be finite.")
+        if x <= self.axis1_[0]:
+            return float(self.values_[0])
+        if x >= self.axis1_[-1]:
+            return float(self.values_[-1])
+        index = int(np.searchsorted(self.axis1_, x, side='right')) - 1
+        return float(self.values_[index] + self.slopes_[index] * (x - self.axis1_[index]))
 
     def integrate(self, start_x: float, end_x: float) -> float:
-        raise NotImplementedError("HW7: implement integrate")
+        if not np.isfinite(start_x) or not np.isfinite(end_x):
+            raise ValueError("Integration limits must be finite.")
+        return self._primitive(end_x) - self._primitive(start_x)
+
+    def _primitive(self, x: float) -> float:
+        """Integral from the first node to x, including flat extrapolation."""
+        if x <= self.axis1_[0]:
+            return float(self.values_[0] * (x - self.axis1_[0]))
+        if x >= self.axis1_[-1]:
+            return float(self.integrated_values_[-1] + self.values_[-1] * (x - self.axis1_[-1]))
+        index = int(np.searchsorted(self.axis1_, x, side='right')) - 1
+        dx = x - self.axis1_[index]
+        return float(self.integrated_values_[index] + self.values_[index] * dx
+                     + 0.5 * self.slopes_[index] * dx ** 2)
 
     # Optional risk interface
     # The test cells for risk are not prepared but you can do it by your own.
